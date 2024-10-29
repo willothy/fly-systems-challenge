@@ -1,9 +1,10 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    ptr::NonNull,
     sync::atomic::AtomicU64,
 };
 
-use futures::{SinkExt, StreamExt};
+use futures::SinkExt;
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use snafu::Snafu;
@@ -47,7 +48,7 @@ pub struct Peer {
 /// The top-level service state for a Maelstrom node.
 pub struct Node {
     /// The node ID.
-    id: OnceCell<String>,
+    id: OnceCell<(NonNull<str>, usize)>,
     /// Map of node ID to neighnor node IDs.
     topology: RwLock<HashMap<String, HashSet<Peer>>>,
     /// The next message ID to assign.
@@ -55,8 +56,21 @@ pub struct Node {
     /// The channel used to send and receive messages
     channel: tokio_util::codec::Framed<
         tokio::io::Join<Stdin, Stdout>,
-        tokio_serde::formats::SymmetricalJson<Message>,
+        tokio_serde::formats::Json<Message<String>, Message<&'static str>>,
     >,
+}
+
+impl Drop for Node {
+    fn drop(&mut self) {
+        let Some((mut id, cap)) = self.id.take() else {
+            return;
+        };
+
+        // Safety: there should be no other references to this string.
+        let id = unsafe { id.as_mut() };
+
+        drop(unsafe { String::from_raw_parts(id.as_mut_ptr(), id.len(), cap) });
+    }
 }
 
 impl Node {
@@ -68,7 +82,7 @@ impl Node {
             next_message_id: AtomicU64::new(0),
             channel: tokio_util::codec::Framed::new(
                 tokio::io::join(tokio::io::stdin(), tokio::io::stdout()),
-                tokio_serde::formats::SymmetricalJson::default(),
+                tokio_serde::formats::Json::default(),
             ),
         }
     }
@@ -79,16 +93,36 @@ impl Node {
     }
 
     pub async fn send(&mut self, dest: String, body: MessageBody) -> Result<()> {
-        let src = self
-            .id
-            .get()
-            .expect("node ID should be set on init")
-            .clone();
+        let src = self.node_id();
         Ok(self.channel.send(Message { src, dest, body }).await?)
     }
 
-    pub async fn recv(&mut self) -> Result<Option<Message>> {
-        Ok(self.channel.next().await.transpose()?)
+    pub async fn recv(&mut self) -> Result<Option<Message<String>>> {
+        Ok(tokio_stream::StreamExt::next(&mut self.channel)
+            .await
+            .transpose()?)
+    }
+
+    fn node_id(&mut self) -> &'static str {
+        unsafe {
+            self.id
+                .get()
+                .expect("node ID should be set on init")
+                .0
+                .as_ref()
+        }
+    }
+
+    async fn set_node_id(&mut self, id: String) {
+        self.id
+            .get_or_init(|| async move {
+                let len = id.len();
+                (
+                    NonNull::new(id.leak()).expect("id ptr should never be null"),
+                    len,
+                )
+            })
+            .await;
     }
 
     pub async fn run(&mut self) -> Result<()> {
@@ -103,7 +137,7 @@ impl Node {
                         node_ids: _,
                     } => {
                         tracing::info!("Received Init message from {}", src);
-                        self.id.set(node_id).ok();
+                        self.set_node_id(node_id).await;
 
                         self.send(
                             src,
@@ -209,9 +243,9 @@ pub enum MessageBody {
 
 /// A Maelstrom message.
 #[derive(Debug, Serialize, Deserialize)]
-pub struct Message {
+pub struct Message<Src> {
     /// The node ID of the sender.
-    pub src: String,
+    pub src: Src,
 
     /// The node ID of the receiver.
     pub dest: String,

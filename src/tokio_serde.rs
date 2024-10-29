@@ -365,8 +365,7 @@ pub mod formats {
 
         impl<Item, SinkItem> Decoder for Json<Item, SinkItem>
         where
-            Item: DeserializeOwned,
-            SinkItem: Serialize,
+            Item: DeserializeOwned, // SinkItem: Serialize ,
         {
             type Item = Item;
             type Error = std::io::Error;
@@ -382,13 +381,13 @@ pub mod formats {
             }
         }
 
-        impl<Item, SinkItem> Encoder<Item> for Json<Item, SinkItem>
+        impl<Item, SinkItem> Encoder<SinkItem> for Json<Item, SinkItem>
         where
-            Item: Serialize,
+            SinkItem: Serialize,
         {
             type Error = std::io::Error;
 
-            fn encode(&mut self, item: Item, dst: &mut BytesMut) -> Result<(), Self::Error> {
+            fn encode(&mut self, item: SinkItem, dst: &mut BytesMut) -> Result<(), Self::Error> {
                 let mut w = dst.writer();
 
                 serde_json::to_writer(&mut w, &item)?;

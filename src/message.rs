@@ -49,6 +49,7 @@ pub struct MessageBody<Data, Id> {
     #[serde(rename = "msg_id")]
     pub id: Option<Id>,
     /// The ID of the message this message is in reply to.
+    #[serde(rename = "in_reply_to")]
     pub re: Option<Id>,
     #[serde(flatten)]
     pub data: Data,

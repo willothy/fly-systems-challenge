@@ -63,6 +63,7 @@ where
     pub async fn send(
         &mut self,
         dest: String,
+        re: Option<IdGenerator::Id>,
         data: Protocol::Data,
     ) -> std::result::Result<(), Protocol::Error> {
         let src = self
@@ -77,7 +78,7 @@ where
                 dest,
                 body: MessageBody {
                     id: Some(self.next_message_id()),
-                    re: None,
+                    re,
                     data,
                 },
             })

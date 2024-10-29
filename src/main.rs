@@ -35,6 +35,7 @@ pub enum ErrorCode {
 }
 
 // Valid message for testing: { "src": "a", "dest": "b", "body": { "type": "error", "code": 1, "text": "test", "msg_id": 1, "in_reply_to": 1 }}
+// { "src": "a", "dest": "b", "body": { "type": "init", "node_id": "a", "node_ids": ["a", "b"] }}
 
 /// The message body of a Maelstrom message.
 #[derive(Debug, Serialize, Deserialize)]
@@ -95,11 +96,12 @@ impl MessageProtocol for FlyChallengeService {
                 tracing::info!("Received Init message from {}", src);
                 node.id.set(node_id).ok();
 
-                node.send(src, RealMessageData::InitOk).await?;
+                node.send(src, body.id, RealMessageData::InitOk).await?;
             }
             RealMessageData::Echo { echo } => {
                 tracing::info!("Received Echo message from {}", src);
-                node.send(src, RealMessageData::EchoOk { echo }).await?;
+                node.send(src, body.id, RealMessageData::EchoOk { echo })
+                    .await?;
             }
             unexpected => {
                 tracing::warn!("Unexpected message: {:?}", unexpected);

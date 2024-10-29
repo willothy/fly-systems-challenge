@@ -52,6 +52,7 @@ pub struct Node {
     topology: RwLock<HashMap<String, HashSet<Peer>>>,
     /// The next message ID to assign.
     next_message_id: AtomicU64,
+    /// The channel used to send and receive messages
     channel: tokio_util::codec::Framed<
         tokio::io::Join<Stdin, Stdout>,
         tokio_serde::formats::SymmetricalJson<Message>,
@@ -70,6 +71,11 @@ impl Node {
                 tokio_serde::formats::SymmetricalJson::default(),
             ),
         }
+    }
+
+    pub fn next_message_id(&self) -> u64 {
+        self.next_message_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
     pub async fn send(&mut self, dest: String, body: MessageBody) -> Result<()> {
@@ -102,6 +108,7 @@ impl Node {
                         self.send(
                             src,
                             MessageBody::InitOk {
+                                msg_id: self.next_message_id(),
                                 in_reply_to: msg_id,
                             },
                         )
@@ -112,9 +119,7 @@ impl Node {
                         self.send(
                             src,
                             MessageBody::EchoOk {
-                                msg_id: self
-                                    .next_message_id
-                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                                msg_id: self.next_message_id(),
                                 in_reply_to: msg_id,
                                 echo,
                             },
@@ -167,7 +172,11 @@ pub enum MessageBody {
         node_ids: Vec<String>,
     },
     /// Sent from Maelstrom to each node to indicate that the simulation has started.
-    InitOk { in_reply_to: u64 },
+    InitOk {
+        msg_id: u64,
+        in_reply_to: u64,
+    },
+
     Error {
         in_reply_to: u64,
         code: ErrorCode,
@@ -191,6 +200,10 @@ pub enum MessageBody {
         msg_id: u64,
         in_reply_to: u64,
         echo: serde_json::Value,
+    },
+    Generate,
+    GenerateOk {
+        id: u64,
     },
 }
 

@@ -318,11 +318,7 @@ pub mod formats {
     pub use self::json::*;
 
     mod json {
-        use std::{
-            io::{Read, Write},
-            marker::PhantomData,
-            pin::Pin,
-        };
+        use std::{io::Write, marker::PhantomData, pin::Pin};
 
         use crate::tokio_serde::{Deserializer, Serializer};
 
@@ -365,8 +361,7 @@ pub mod formats {
 
         impl<Item, SinkItem> Decoder for Json<Item, SinkItem>
         where
-            Item: DeserializeOwned,
-            SinkItem: Serialize,
+            for<'a> Item: DeserializeOwned + Deserialize<'a>,
         {
             type Item = Item;
             type Error = std::io::Error;

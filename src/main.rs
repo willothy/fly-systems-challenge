@@ -1,141 +1,20 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet},
     sync::atomic::AtomicU64,
 };
 
-use futures::{SinkExt, StreamExt};
+use message::{GenerateId, Message, MessageProtocol};
+use node::Node;
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
-use snafu::Snafu;
-use tokio::{
-    io::{Stdin, Stdout},
-    sync::{OnceCell, RwLock},
-};
 
 mod tokio_serde;
 
-#[derive(Debug, Snafu)]
-pub enum Error {
-    #[snafu(display("IO error: {}", source))]
-    Io {
-        #[snafu(source)]
-        source: std::io::Error,
-    },
+mod error;
+mod message;
+mod node;
 
-    #[snafu(whatever, display("{message}"))]
-    Whatever {
-        message: String,
-        #[snafu(source(from(Box<dyn std::error::Error>, Some)))]
-        source: Option<Box<dyn std::error::Error>>,
-    },
-}
-
-impl From<std::io::Error> for Error {
-    fn from(source: std::io::Error) -> Self {
-        Self::Io { source }
-    }
-}
-
-pub type Result<T = ()> = std::result::Result<T, Error>;
-
-/// A peer node in the Maelstrom network.
-pub struct Peer {
-    /// The node ID of the peer.
-    id: String,
-}
-
-/// The top-level service state for a Maelstrom node.
-pub struct Node {
-    /// The node ID.
-    id: OnceCell<String>,
-    /// Map of node ID to neighnor node IDs.
-    topology: RwLock<HashMap<String, HashSet<Peer>>>,
-    /// The next message ID to assign.
-    next_message_id: AtomicU64,
-    /// The channel used to send and receive messages
-    channel: tokio_util::codec::Framed<
-        tokio::io::Join<Stdin, Stdout>,
-        tokio_serde::formats::SymmetricalJson<Message>,
-    >,
-}
-
-impl Node {
-    pub fn new() -> Self {
-        Self {
-            // Default ID should be empty string - this will be set by the Maelstrom service.
-            id: OnceCell::new(),
-            topology: RwLock::new(HashMap::new()),
-            next_message_id: AtomicU64::new(0),
-            channel: tokio_util::codec::Framed::new(
-                tokio::io::join(tokio::io::stdin(), tokio::io::stdout()),
-                tokio_serde::formats::SymmetricalJson::default(),
-            ),
-        }
-    }
-
-    pub fn next_message_id(&self) -> u64 {
-        self.next_message_id
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    }
-
-    pub async fn send(&mut self, dest: String, body: MessageBody) -> Result<()> {
-        let src = self
-            .id
-            .get()
-            .expect("node ID should be set on init")
-            .clone();
-        Ok(self.channel.send(Message { src, dest, body }).await?)
-    }
-
-    pub async fn recv(&mut self) -> Result<Option<Message>> {
-        Ok(self.channel.next().await.transpose()?)
-    }
-
-    pub async fn run(&mut self) -> Result<()> {
-        tracing::info!("Starting Maelstrom node");
-
-        while let Some(msg) = self.recv().await? {
-            match msg {
-                Message { src, body, .. } => match body {
-                    MessageBody::Init {
-                        msg_id,
-                        node_id,
-                        node_ids: _,
-                    } => {
-                        tracing::info!("Received Init message from {}", src);
-                        self.id.set(node_id).ok();
-
-                        self.send(
-                            src,
-                            MessageBody::InitOk {
-                                msg_id: self.next_message_id(),
-                                in_reply_to: msg_id,
-                            },
-                        )
-                        .await?;
-                    }
-                    MessageBody::Echo { msg_id, echo } => {
-                        tracing::info!("Received Echo message from {}", src);
-                        self.send(
-                            src,
-                            MessageBody::EchoOk {
-                                msg_id: self.next_message_id(),
-                                in_reply_to: msg_id,
-                                echo,
-                            },
-                        )
-                        .await?;
-                    }
-                    unexpected => {
-                        tracing::warn!("Unexpected message: {:?}", unexpected);
-                    }
-                },
-            }
-        }
-
-        Ok(())
-    }
-}
+pub use error::*;
 
 /// A Maelstrom error code.
 #[derive(Debug, Serialize_repr, Deserialize_repr)]
@@ -161,10 +40,9 @@ pub enum ErrorCode {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "type")]
-pub enum MessageBody {
+pub enum RealMessageData {
     /// Sent from Maelstrom to each node at the start of the simulation.
     Init {
-        msg_id: u64,
         /// The node ID assigned to the receiver. The receiver should use this ID in all subsequent
         node_id: String,
         /// A list of every node ID in the network, including the receiver. An identical list,
@@ -172,33 +50,22 @@ pub enum MessageBody {
         node_ids: Vec<String>,
     },
     /// Sent from Maelstrom to each node to indicate that the simulation has started.
-    InitOk {
-        msg_id: u64,
-        in_reply_to: u64,
-    },
+    InitOk,
 
     Error {
-        in_reply_to: u64,
         code: ErrorCode,
         text: String,
     },
     Topology {
-        msg_id: u64,
         topology: BTreeMap<String, BTreeSet<String>>,
     },
-    TopologyOk {
-        msg_id: Option<u64>,
-        in_reply_to: u64,
-    },
+    TopologyOk,
 
     // Application messages
     Echo {
-        msg_id: u64,
         echo: serde_json::Value,
     },
     EchoOk {
-        msg_id: u64,
-        in_reply_to: u64,
         echo: serde_json::Value,
     },
     Generate,
@@ -207,17 +74,55 @@ pub enum MessageBody {
     },
 }
 
-/// A Maelstrom message.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Message {
-    /// The node ID of the sender.
-    pub src: String,
+#[derive(Default)]
+struct FlyChallengeService;
 
-    /// The node ID of the receiver.
-    pub dest: String,
+impl MessageProtocol for FlyChallengeService {
+    type IdGenerator = U64Generator;
+    type Data = RealMessageData;
+    type Error = Error;
 
-    /// The message content, with type defined by enum variant.
-    pub body: MessageBody,
+    async fn handle(
+        &self,
+        Message { src, body, .. }: Message<Self::Data, <Self::IdGenerator as GenerateId>::Id>,
+        node: &mut Node<Self, Self::IdGenerator>,
+    ) -> Result<()> {
+        match body.data {
+            RealMessageData::Init {
+                node_id,
+                node_ids: _,
+            } => {
+                tracing::info!("Received Init message from {}", src);
+                node.id.set(node_id).ok();
+
+                node.send(src, RealMessageData::InitOk).await?;
+            }
+            RealMessageData::Echo { echo } => {
+                tracing::info!("Received Echo message from {}", src);
+                node.send(src, RealMessageData::EchoOk { echo }).await?;
+            }
+            unexpected => {
+                tracing::warn!("Unexpected message: {:?}", unexpected);
+            }
+        }
+        Ok(())
+    }
+}
+
+pub struct U64Generator(AtomicU64);
+
+impl Default for U64Generator {
+    fn default() -> Self {
+        Self(AtomicU64::new(0))
+    }
+}
+
+impl GenerateId for U64Generator {
+    type Id = u64;
+
+    fn generate_id(&self) -> Self::Id {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    }
 }
 
 #[tokio::main]
@@ -230,5 +135,5 @@ async fn main() -> Result<()> {
         .with_file(true)
         .init();
 
-    Node::new().run().await
+    Node::<FlyChallengeService, U64Generator>::new().run().await
 }

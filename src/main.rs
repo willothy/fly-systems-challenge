@@ -7,7 +7,10 @@ use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use snafu::Snafu;
-use tokio::sync::{OnceCell, RwLock};
+use tokio::{
+    io::{Stdin, Stdout},
+    sync::{OnceCell, RwLock},
+};
 
 mod tokio_serde;
 
@@ -49,6 +52,10 @@ pub struct Node {
     topology: RwLock<HashMap<String, HashSet<Peer>>>,
     /// The next message ID to assign.
     next_message_id: AtomicU64,
+    channel: tokio_util::codec::Framed<
+        tokio::io::Join<Stdin, Stdout>,
+        tokio_serde::formats::SymmetricalJson<Message>,
+    >,
 }
 
 impl Node {
@@ -58,20 +65,32 @@ impl Node {
             id: OnceCell::new(),
             topology: RwLock::new(HashMap::new()),
             next_message_id: AtomicU64::new(0),
+            channel: tokio_util::codec::Framed::new(
+                tokio::io::join(tokio::io::stdin(), tokio::io::stdout()),
+                tokio_serde::formats::SymmetricalJson::default(),
+            ),
         }
     }
 
-    pub async fn run(&self) -> Result<()> {
+    pub async fn send(&mut self, dest: String, body: MessageBody) -> Result<()> {
+        let src = self
+            .id
+            .get()
+            .expect("node ID should be set on init")
+            .clone();
+        Ok(self.channel.send(Message { src, dest, body }).await?)
+    }
+
+    pub async fn recv(&mut self) -> Result<Option<Message>> {
+        Ok(self.channel.next().await.transpose()?)
+    }
+
+    pub async fn run(&mut self) -> Result<()> {
         tracing::info!("Starting Maelstrom node");
 
-        let mut channel = tokio_util::codec::Framed::new(
-            tokio::io::join(tokio::io::stdin(), tokio::io::stdout()),
-            tokio_serde::formats::SymmetricalJson::default(),
-        );
-
-        while let Some(msg) = channel.next().await.transpose()? {
+        while let Some(msg) = self.recv().await? {
             match msg {
-                Message { src, dest, body } => match body {
+                Message { src, body, .. } => match body {
                     MessageBody::Init {
                         msg_id,
                         node_id,
@@ -80,31 +99,27 @@ impl Node {
                         tracing::info!("Received Init message from {}", src);
                         self.id.set(node_id).ok();
 
-                        channel
-                            .send(Message {
-                                src: dest,
-                                dest: src,
-                                body: MessageBody::InitOk {
-                                    in_reply_to: msg_id,
-                                },
-                            })
-                            .await?;
+                        self.send(
+                            src,
+                            MessageBody::InitOk {
+                                in_reply_to: msg_id,
+                            },
+                        )
+                        .await?;
                     }
                     MessageBody::Echo { msg_id, echo } => {
                         tracing::info!("Received Echo message from {}", src);
-                        channel
-                            .send(Message {
-                                src: dest,
-                                dest: src,
-                                body: MessageBody::EchoOk {
-                                    msg_id: self
-                                        .next_message_id
-                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-                                    in_reply_to: msg_id,
-                                    echo,
-                                },
-                            })
-                            .await?;
+                        self.send(
+                            src,
+                            MessageBody::EchoOk {
+                                msg_id: self
+                                    .next_message_id
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                                in_reply_to: msg_id,
+                                echo,
+                            },
+                        )
+                        .await?;
                     }
                     unexpected => {
                         tracing::warn!("Unexpected message: {:?}", unexpected);

@@ -1,0 +1,25 @@
+[package]
+name = "fly-systems-challenge"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bytes = { version = "1.8.0", features = ["serde"] }
+educe = { version = "0.6.0", features = ["full"] }
+futures = { version = "0.3.31", default-features = false, features = [
+  "alloc",
+  "async-await",
+  "std",
+] }
+futures-core = "0.3.31"
+pin-project = "1.1.7"
+serde = { version = "1.0.213", features = ["derive"] }
+serde_json = "1.0.132"
+serde_repr = "0.1.19"
+snafu = "0.8.5"
+tokio = { version = "1.41.0", features = ["full"] }
+tokio-serde-json = "0.3.0"
+tokio-stream = { version = "0.1.16", features = ["full"] }
+tokio-util = { version = "0.7.12", features = ["full"] }
+tracing = { version = "0.1.40", features = ["async-await"] }
+tracing-subscriber = { version = "0.3.18", features = ["tracing", "serde"] }

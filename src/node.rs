@@ -1,6 +1,11 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    future::Future,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use futures::SinkExt as _;
+use serde::{Deserialize, Serialize};
 use tokio::{
     io::{Stdin, Stdout},
     sync::{OnceCell, RwLock},
@@ -8,7 +13,7 @@ use tokio::{
 use tokio_stream::StreamExt as _;
 
 use crate::{
-    message::{GenerateId, Message, MessageBody, MessageId, MessageProtocol},
+    message::{Message, MessageBody, MessageId},
     tokio_serde,
 };
 
@@ -20,7 +25,7 @@ pub struct Peer {
 }
 
 /// The top-level service state for a Maelstrom node.
-pub struct Node<Protocol: MessageProtocol, IdGenerator: GenerateId> {
+pub struct NodeState<NodeImpl: Node> {
     /// The node ID.
     pub id: OnceCell<String>,
     /// Map of node ID to neighnor node IDs.
@@ -29,21 +34,27 @@ pub struct Node<Protocol: MessageProtocol, IdGenerator: GenerateId> {
     /// The channel used to send and receive messages
     channel: tokio_util::codec::Framed<
         tokio::io::Join<Stdin, Stdout>,
-        tokio_serde::formats::SymmetricalJson<Message<Protocol::Data, IdGenerator::Id>>,
+        tokio_serde::formats::SymmetricalJson<Message<NodeImpl::Message>>,
     >,
-
-    /// Producer for message IDs.
-    id_generator: IdGenerator,
+    next_id: AtomicU64,
 }
 
-impl<Protocol, IdGenerator> Node<Protocol, IdGenerator>
+pub trait Node
 where
-    IdGenerator: GenerateId,
-    IdGenerator::Id: MessageId,
-    Protocol: MessageProtocol<IdGenerator = IdGenerator>,
-    Protocol::Error: From<futures::io::Error>,
+    Self: Sized,
 {
-    pub fn new() -> Self {
+    type Message: Serialize + for<'de> Deserialize<'de>;
+    type Error: std::error::Error + 'static;
+
+    fn handle_message(
+        &mut self,
+        message: Message<Self::Message>,
+        state: &mut NodeState<Self>,
+    ) -> impl Future<Output = crate::Result<(), Self::Error>>;
+}
+
+impl<NodeImpl: Node> NodeState<NodeImpl> {
+    fn new() -> Self {
         Self {
             // Default ID should be empty string - this will be set by the Maelstrom service.
             id: OnceCell::new(),
@@ -52,20 +63,42 @@ where
                 tokio::io::join(tokio::io::stdin(), tokio::io::stdout()),
                 tokio_serde::formats::SymmetricalJson::default(),
             ),
-            id_generator: IdGenerator::default(),
+            next_id: AtomicU64::new(0),
         }
     }
 
-    pub fn next_message_id(&self) -> IdGenerator::Id {
-        self.id_generator.generate_id()
+    fn next_message_id(&self) -> crate::message::MessageId {
+        self.next_id.fetch_add(1, Ordering::SeqCst)
     }
 
+    async fn recv(&mut self) -> crate::Result<Option<Message<NodeImpl::Message>>, NodeImpl::Error> {
+        Ok(self.channel.next().await.transpose()?)
+    }
+
+    pub async fn reply(
+        &mut self,
+        dest: String,
+        re: MessageId,
+        data: NodeImpl::Message,
+    ) -> crate::Result<(), NodeImpl::Error> {
+        self.send_message(dest, Some(re), data).await
+    }
+
+    #[allow(unused)]
     pub async fn send(
         &mut self,
         dest: String,
-        re: Option<IdGenerator::Id>,
-        data: Protocol::Data,
-    ) -> std::result::Result<(), Protocol::Error> {
+        data: NodeImpl::Message,
+    ) -> crate::Result<(), NodeImpl::Error> {
+        self.send_message(dest, None, data).await
+    }
+
+    async fn send_message(
+        &mut self,
+        dest: String,
+        re: Option<MessageId>,
+        data: NodeImpl::Message,
+    ) -> crate::Result<(), NodeImpl::Error> {
         let src = self
             .id
             .get()
@@ -85,22 +118,24 @@ where
             .await?)
     }
 
-    pub async fn recv(
-        &mut self,
-    ) -> std::result::Result<Option<Message<Protocol::Data, IdGenerator::Id>>, Protocol::Error>
-    {
-        Ok(self.channel.next().await.transpose()?)
-    }
-
-    pub async fn run(&mut self) -> std::result::Result<(), Protocol::Error> {
+    pub async fn run(mut self, mut node: NodeImpl) -> Result<(), crate::Error<NodeImpl::Error>> {
         tracing::info!("Starting Maelstrom node");
 
-        let service = Protocol::default();
+        loop {
+            let msg = match self.recv().await? {
+                Some(msg) => msg,
+                None => break,
+            };
 
-        while let Some(msg) = self.recv().await? {
-            service.handle(msg, self).await?;
+            node.handle_message(msg, &mut self).await?;
         }
 
         Ok(())
     }
+}
+
+pub async fn run<NodeImpl: Node + 'static>(
+    node: NodeImpl,
+) -> Result<(), crate::Error<NodeImpl::Error>> {
+    NodeState::new().run(node).await
 }

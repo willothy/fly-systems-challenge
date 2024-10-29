@@ -1,11 +1,17 @@
 use snafu::Snafu;
 
 #[derive(Debug, Snafu)]
-pub enum Error {
+pub enum Error<E: std::error::Error + Sized + 'static> {
     #[snafu(display("IO error: {}", source))]
     Io {
         #[snafu(source)]
         source: std::io::Error,
+    },
+
+    #[snafu(display("Node error: {}", source))]
+    Node {
+        #[snafu(source)]
+        source: E,
     },
 
     #[snafu(whatever, display("{message}"))]
@@ -16,10 +22,10 @@ pub enum Error {
     },
 }
 
-impl From<std::io::Error> for Error {
+impl<E: std::error::Error> From<std::io::Error> for Error<E> {
     fn from(source: std::io::Error) -> Self {
         Self::Io { source }
     }
 }
 
-pub type Result<T = ()> = std::result::Result<T, Error>;
+pub type Result<T, E = Box<dyn std::error::Error + 'static>> = std::result::Result<T, Error<E>>;

@@ -1,63 +1,21 @@
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 
-use crate::node::Node;
-
-pub trait MessageId
-where
-    Self: std::fmt::Debug
-        + Clone
-        + PartialEq
-        + Serialize
-        + DeserializeOwned
-        + for<'a> Deserialize<'a>,
-{
-}
-
-impl<T> MessageId for T where
-    Self: std::fmt::Debug
-        + Clone
-        + PartialEq
-        + Serialize
-        + DeserializeOwned
-        + for<'a> Deserialize<'a>
-{
-}
-
-pub trait GenerateId
-where
-    Self: Default,
-{
-    type Id: MessageId;
-
-    fn generate_id(&self) -> Self::Id;
-}
-
-pub trait MessageProtocol: Default + Sized {
-    type IdGenerator: GenerateId;
-    type Data: Serialize + DeserializeOwned;
-    type Error: std::error::Error + 'static;
-
-    fn handle(
-        &self,
-        message: Message<Self::Data, <Self::IdGenerator as GenerateId>::Id>,
-        node: &mut Node<Self, Self::IdGenerator>,
-    ) -> impl std::future::Future<Output = Result<(), Self::Error>>;
-}
+pub type MessageId = u64;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MessageBody<Data, Id> {
+pub struct MessageBody<Data> {
     #[serde(rename = "msg_id")]
-    pub id: Option<Id>,
+    pub id: Option<MessageId>,
     /// The ID of the message this message is in reply to.
     #[serde(rename = "in_reply_to")]
-    pub re: Option<Id>,
+    pub re: Option<MessageId>,
     #[serde(flatten)]
     pub data: Data,
 }
 
 /// A Maelstrom message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Message<Data, Id> {
+pub struct Message<Data> {
     /// The node ID of the sender.
     pub src: String,
 
@@ -65,5 +23,5 @@ pub struct Message<Data, Id> {
     pub dest: String,
 
     /// The message content, with type defined by enum variant.
-    pub body: MessageBody<Data, Id>,
+    pub body: MessageBody<Data>,
 }

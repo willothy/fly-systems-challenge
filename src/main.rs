@@ -1,10 +1,5 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::atomic::AtomicU64,
-};
-
-use message::{GenerateId, Message, MessageProtocol};
-use node::Node;
+use message::Message;
+use node::{Node, NodeState};
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 
@@ -15,6 +10,7 @@ mod message;
 mod node;
 
 pub use error::*;
+use snafu::{Report, Snafu};
 
 /// A Maelstrom error code.
 #[derive(Debug, Serialize_repr, Deserialize_repr)]
@@ -41,7 +37,7 @@ pub enum ErrorCode {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "type")]
-pub enum RealMessageData {
+pub enum EchoServiceMessage {
     /// Sent from Maelstrom to each node at the start of the simulation.
     Init {
         /// The node ID assigned to the receiver. The receiver should use this ID in all subsequent
@@ -57,10 +53,6 @@ pub enum RealMessageData {
         code: ErrorCode,
         text: String,
     },
-    Topology {
-        topology: BTreeMap<String, BTreeSet<String>>,
-    },
-    TopologyOk,
 
     // Application messages
     Echo {
@@ -69,38 +61,60 @@ pub enum RealMessageData {
     EchoOk {
         echo: serde_json::Value,
     },
-    Generate,
-    GenerateOk {
-        id: u64,
-    },
 }
 
 #[derive(Default)]
-struct FlyChallengeService;
+struct EchoService;
 
-impl MessageProtocol for FlyChallengeService {
-    type IdGenerator = U64Generator;
-    type Data = RealMessageData;
-    type Error = Error;
+#[derive(Debug, Snafu)]
+pub enum EchoServiceError {
+    #[snafu(display("Missing message ID"))]
+    MissingMessageId,
+    #[snafu(whatever, display("{message}"))]
+    Whatever {
+        message: String,
+        #[snafu(source(from(Box<dyn std::error::Error>, Some)))]
+        source: Option<Box<dyn std::error::Error>>,
+    },
+}
 
-    async fn handle(
-        &self,
-        Message { src, body, .. }: Message<Self::Data, <Self::IdGenerator as GenerateId>::Id>,
-        node: &mut Node<Self, Self::IdGenerator>,
-    ) -> Result<()> {
+impl Into<Error<Self>> for EchoServiceError {
+    fn into(self) -> Error<Self> {
+        Error::Node { source: self }
+    }
+}
+
+impl Node for EchoService {
+    type Message = EchoServiceMessage;
+    type Error = EchoServiceError;
+
+    async fn handle_message(
+        &mut self,
+        Message { src, body, .. }: Message<Self::Message>,
+        node: &mut NodeState<Self>,
+    ) -> Result<(), Self::Error> {
         match body.data {
-            RealMessageData::Init {
+            EchoServiceMessage::Init {
                 node_id,
                 node_ids: _,
             } => {
                 tracing::info!("Received Init message from {}", src);
                 node.id.set(node_id).ok();
 
-                node.send(src, body.id, RealMessageData::InitOk).await?;
+                let Some(id) = body.id else {
+                    return Err(EchoServiceError::MissingMessageId.into());
+                };
+
+                node.reply(src, id, EchoServiceMessage::InitOk).await?;
             }
-            RealMessageData::Echo { echo } => {
+            EchoServiceMessage::Echo { echo } => {
                 tracing::info!("Received Echo message from {}", src);
-                node.send(src, body.id, RealMessageData::EchoOk { echo })
+
+                let Some(id) = body.id else {
+                    return Err(EchoServiceError::MissingMessageId.into());
+                };
+
+                node.reply(src, id, EchoServiceMessage::EchoOk { echo })
                     .await?;
             }
             unexpected => {
@@ -111,24 +125,8 @@ impl MessageProtocol for FlyChallengeService {
     }
 }
 
-pub struct U64Generator(AtomicU64);
-
-impl Default for U64Generator {
-    fn default() -> Self {
-        Self(AtomicU64::new(0))
-    }
-}
-
-impl GenerateId for U64Generator {
-    type Id = u64;
-
-    fn generate_id(&self) -> Self::Id {
-        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-    }
-}
-
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() {
     tracing_subscriber::fmt()
         .with_ansi(true)
         // Output logs to stderr to conform with Maelstrom spec.
@@ -137,5 +135,7 @@ async fn main() -> Result<()> {
         .with_file(true)
         .init();
 
-    Node::<FlyChallengeService, U64Generator>::new().run().await
+    if let Err(e) = node::run(EchoService).await {
+        println!("{}", Report::from_error(e));
+    }
 }

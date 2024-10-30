@@ -1,6 +1,7 @@
 use services::broadcast::BroadcastService;
 use snafu::Report;
 
+mod async_dashmap;
 mod tokio_serde;
 
 mod error;

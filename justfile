@@ -8,7 +8,7 @@ unique-ids: bootstrap bin
     ./maelstrom/maelstrom test -w unique-ids --bin target/release/fly-systems-challenge --time-limit 30 --rate 1000 --node-count 3 --availability total --nemesis partition
 
 broadcast: bootstrap bin
-    ./maelstrom/maelstrom test -w broadcast --bin target/release/fly-systems-challenge --node-count 1 --time-limit 20 --rate 10
+    ./maelstrom/maelstrom test -w broadcast --bin target/release/fly-systems-challenge --node-count 5 --time-limit 20 --rate 10
 
 bootstrap:
     #!/usr/bin/env bash

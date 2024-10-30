@@ -6,10 +6,11 @@ use std::{
     },
 };
 
-use futures::{SinkExt as _, StreamExt};
+use futures::SinkExt as _;
 use serde::{Deserialize, Serialize};
 use snafu::Snafu;
 use tokio::sync::OnceCell;
+use tokio_stream::StreamExt;
 
 use crate::{
     message::{DataOrInit, Message, MessageBody, MessageId},
@@ -81,6 +82,13 @@ where
         message: Message<Self::Message>,
         state: &NodeState<Self>,
     ) -> impl Future<Output = crate::Result<(), Self::Error>> + Send + Sync;
+
+    fn init(
+        &self,
+        state: &NodeState<Self>,
+    ) -> impl Future<Output = crate::Result<(), Self::Error>> + Send + Sync {
+        async { Ok(()) }
+    }
 }
 
 impl<NodeImpl: Node + Send + Sync + 'static> NodeState<NodeImpl> {
@@ -120,7 +128,7 @@ impl<NodeImpl: Node + Send + Sync + 'static> NodeState<NodeImpl> {
         self.send_message(dest, None, DataOrInit::Data(data)).await
     }
 
-    async fn send_message(
+    pub async fn send_message(
         &self,
         dest: String,
         re: Option<MessageId>,
@@ -199,10 +207,13 @@ impl<NodeImpl: Node + Send + Sync + 'static> NodeState<NodeImpl> {
         }
 
         tokio::spawn(async move {
+            let mut buf = Vec::new();
             loop {
-                while let Some(msg) = rx.recv().await {
-                    output.send(msg).await.ok();
+                rx.recv_many(&mut buf, 8).await;
+                for msg in buf.drain(..) {
+                    output.feed(msg).await.ok();
                 }
+                output.flush().await.ok();
             }
         });
 

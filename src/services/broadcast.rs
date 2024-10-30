@@ -2,15 +2,13 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use arc_swap::access::Access;
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use snafu::Snafu;
-use tokio::sync::{Mutex, RwLock};
 
 use crate::async_dashmap::AsyncDashMap;
 pub use crate::error::*;
-use crate::message::Message;
+use crate::message::{DataOrInit, Message};
 use crate::node::{Node, NodeState};
 
 /// A Maelstrom error code.
@@ -31,7 +29,7 @@ pub enum ErrorCode {
     TxnConflict = 30,
 }
 
-type BroadcsatValue = u64;
+type BroadcastValue = u64;
 
 /// The message body of a Maelstrom message.
 #[derive(Debug, Serialize, Deserialize)]
@@ -47,18 +45,21 @@ pub enum BroadcastMessage {
     TopologyOk,
     Read,
     ReadOk {
-        messages: Vec<BroadcsatValue>,
+        messages: HashSet<BroadcastValue>,
     },
     Broadcast {
-        message: BroadcsatValue,
+        message: BroadcastValue,
     },
     BroadcastOk,
+    Gossip {
+        seen: HashSet<BroadcastValue>,
+    },
 }
 
 pub struct BroadcastServiceInner {
-    topology: arc_swap::ArcSwap<HashMap<String, HashSet<String>>>,
-    received: arc_swap::ArcSwap<im::HashSet<u64>>, // received_w: Mutex<evmap::WriteHandle<u64, ()>>,
-                                                   // read_factory: evmap::ReadHandleFactory<u64, ()>,
+    neighbors: arc_swap::ArcSwap<HashSet<String>>,
+    received: AsyncDashMap<u64, ()>,
+    known: AsyncDashMap<String, HashSet<u64>>,
 }
 
 #[derive(Clone)]
@@ -68,13 +69,11 @@ pub struct BroadcastService {
 
 impl Default for BroadcastService {
     fn default() -> Self {
-        // let (_received_r, received_w) = evmap::new();
         Self {
             inner: Arc::new(BroadcastServiceInner {
-                topology: arc_swap::ArcSwap::new(Arc::new(HashMap::new())),
-                received: arc_swap::ArcSwap::new(Arc::new(im::HashSet::new())),
-                // read_factory: received_w.factory(),
-                // received_w: Mutex::new(received_w),
+                neighbors: arc_swap::ArcSwap::new(Arc::new(HashSet::new())),
+                received: AsyncDashMap::new(),
+                known: AsyncDashMap::new(),
             }),
         }
     }
@@ -96,47 +95,63 @@ impl Into<Error<Self>> for BroadcastError {
     }
 }
 
+impl BroadcastService {
+    pub async fn gossip(&self, node: NodeState<Self>) -> crate::Result<(), BroadcastError> {
+        for neighbor in self.inner.neighbors.load().iter() {
+            let known_to_neighbor =
+                self.inner
+                    .known
+                    .get(neighbor)
+                    .await
+                    .ok_or_else(|| Error::Node {
+                        source: BroadcastError::Whatever {
+                            message: "No known messages for neighbor".into(),
+                            source: None,
+                        },
+                    })?;
+
+            let (_already_known, notify_of) = self
+                .inner
+                .received
+                .clone()
+                .into_iter()
+                .map(|(x, _)| x)
+                .partition(|m| known_to_neighbor.contains(m));
+
+            node.send(
+                neighbor.as_str(),
+                BroadcastMessage::Gossip { seen: notify_of },
+            )
+            .await?;
+        }
+
+        Ok(())
+    }
+}
+
 impl Node for BroadcastService {
     type Message = BroadcastMessage;
     type Error = BroadcastError;
 
-    async fn init(&self, node: &NodeState<Self>) -> crate::Result<(), Self::Error> {
-        tokio::spawn({
-            let node = node.clone();
-            let inner = self.inner.clone();
-            async move {
-                let mut interval = tokio::time::interval(Duration::from_millis(500));
-                // interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    async fn init(
+        &self,
+        node: &NodeState<Self>,
+        node_ids: Vec<String>,
+    ) -> crate::Result<(), Self::Error> {
+        for node_id in node_ids {
+            self.inner.known.insert(node_id, HashSet::new()).await;
+        }
 
-                // let received_r = inner.read_factory.handle();
+        let service = self.clone();
+        let node = node.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(250));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-                loop {
-                    interval.tick().await;
+            loop {
+                interval.tick().await;
 
-                    if let Some(neighbors) = inner.topology.load().get(node.id()).cloned() {
-                        // let Some(updates) = received_r.read().map(|updates| {
-                        //     updates.iter().map(|entry| *entry.0).collect::<Vec<_>>()
-                        // }) else {
-                        //     tracing::warn!("No updates");
-                        //     continue;
-                        // };
-                        // let received: Vec<_> = self.inner.received.iter().map(|e| *e.key()).collect();
-                        tracing::info!("Sending messages to {:?}", neighbors);
-                        let updates = inner.received.load().clone();
-                        for neighbor in neighbors.iter() {
-                            for message in updates.iter().copied() {
-                                node.send(
-                                    neighbor.clone(),
-                                    BroadcastMessage::Broadcast { message },
-                                )
-                                .await
-                                .ok();
-                            }
-                        }
-                    } else {
-                        tracing::warn!("No topology entry for {}", node.id());
-                    }
-                }
+                service.gossip(node.clone()).await.ok();
             }
         });
 
@@ -145,12 +160,26 @@ impl Node for BroadcastService {
 
     async fn handle_message(
         &self,
-        Message {
-            src, dest, body, ..
-        }: Message<Self::Message>,
+        Message { src, body, .. }: Message<Self::Message>,
         node: &NodeState<Self>,
     ) -> Result<(), Self::Error> {
         match body.data {
+            BroadcastMessage::Gossip { seen } => {
+                self.inner
+                    .known
+                    .get_mut(&src.to_string())
+                    .await
+                    .ok_or_else(|| Error::Node {
+                        source: BroadcastError::Whatever {
+                            message: "No known messages for neighbor".into(),
+                            source: None,
+                        },
+                    })?
+                    .extend(&seen);
+                for message in seen {
+                    self.inner.received.insert(message, ()).await;
+                }
+            }
             BroadcastMessage::Topology { topology } => {
                 tracing::info!("{:?}", topology);
 
@@ -163,46 +192,35 @@ impl Node for BroadcastService {
 
                 node.reply(src, reply, BroadcastMessage::TopologyOk).await?;
 
-                self.inner.topology.store(Arc::new(topology));
+                self.inner.neighbors.store(Arc::new(
+                    topology.get(&*node.id()).cloned().expect("topology"),
+                ));
             }
             BroadcastMessage::Broadcast { message } => {
+                self.inner.received.insert(message, ()).await;
+
                 node.send_message(
                     src.clone(),
                     body.id,
                     crate::message::DataOrInit::Data(BroadcastMessage::BroadcastOk),
                 )
                 .await?;
-
-                // self.inner
-                //     .received_w
-                //     .lock()
-                //     .await
-                //     .insert(message, ())
-                //     .refresh();
-                self.inner.received.rcu(|received| received.update(message));
             }
+            BroadcastMessage::BroadcastOk => {}
+            BroadcastMessage::ReadOk { .. } => {}
             BroadcastMessage::Read => {
-                // let messages = self
-                //     .inner
-                //     .read_factory
-                //     .handle()
-                //     .read()
-                //     .into_iter()
-                //     .map(|mapref| {
-                //         mapref
-                //             .into_iter()
-                //             .map(|(k, _)| *k)
-                //             .collect::<Vec<_>>()
-                //             .into_iter()
-                //     })
-                //     .flatten()
-                //     .collect();
-                let messages = self.inner.received.load().iter().copied().collect();
+                let messages = self
+                    .inner
+                    .received
+                    .clone()
+                    .iter()
+                    .map(|x| *x.key())
+                    .collect::<HashSet<_>>();
 
                 node.send_message(
                     src,
                     body.id,
-                    crate::message::DataOrInit::Data(BroadcastMessage::ReadOk { messages }),
+                    DataOrInit::Data(BroadcastMessage::ReadOk { messages }),
                 )
                 .await
                 .ok();

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 pub type MessageId = u64;
@@ -49,10 +51,10 @@ pub struct MessageBody<Data> {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Message<Data> {
     /// The node ID of the sender.
-    pub src: String,
+    pub src: Arc<str>,
 
     /// The node ID of the receiver.
-    pub dest: String,
+    pub dest: Arc<str>,
 
     /// The message content, with type defined by enum variant.
     pub body: MessageBody<Data>,
@@ -122,8 +124,8 @@ mod tests {
         }
 
         let message = Message {
-            src: "a".to_string(),
-            dest: "b".to_string(),
+            src: "a".into(),
+            dest: "b".into(),
             body: MessageBody {
                 id: Some(1),
                 re: None,
@@ -194,8 +196,8 @@ mod tests {
         assert_eq!(
             init,
             Message {
-                src: "a".to_string(),
-                dest: "b".to_string(),
+                src: "a".into(),
+                dest: "b".into(),
                 body: MessageBody {
                     id: Some(1),
                     re: Some(2),
@@ -225,8 +227,8 @@ mod tests {
         assert_eq!(
             init,
             Message {
-                src: "a".to_string(),
-                dest: "b".to_string(),
+                src: "a".into(),
+                dest: "b".into(),
                 body: MessageBody {
                     id: Some(1),
                     re: Some(2),

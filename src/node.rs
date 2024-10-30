@@ -9,7 +9,7 @@ use std::{
 use futures::SinkExt as _;
 use serde::{Deserialize, Serialize};
 use snafu::Snafu;
-use tokio::sync::OnceCell;
+use tokio::sync::Mutex;
 use tokio_stream::StreamExt;
 
 use crate::{
@@ -40,9 +40,6 @@ impl Into<crate::Error<InternalError>> for InternalError {
 }
 
 pub struct NodeStateInner<NodeImpl: Node + Send + Sync + 'static> {
-    /// The node ID.
-    pub id: OnceCell<String>,
-
     // stdin: tokio_util::codec::FramedRead<
     //     Stdin,
     //     tokio_serde::formats::SymmetricalJson<Message<DataOrInit<NodeImpl::Message>>>,
@@ -53,13 +50,43 @@ pub struct NodeStateInner<NodeImpl: Node + Send + Sync + 'static> {
     //     tokio_serde::formats::SymmetricalJson<Message<DataOrInit<NodeImpl::Message>>>,
     // >,
     next_id: AtomicU64,
-    rpc: tokio::sync::mpsc::UnboundedSender<Message<DataOrInit<NodeImpl::Message>>>,
+    // rpc: tokio::sync::mpsc::UnboundedSender<Message<DataOrInit<NodeImpl::Message>>>,
     node: NodeImpl,
+    output: Mutex<
+        tokio_util::codec::FramedWrite<
+            tokio::io::Stdout,
+            tokio_serde::formats::SymmetricalJson<Message<DataOrInit<NodeImpl::Message>>>,
+        >,
+    >,
+
+    /// The node ID. Variable sized to allow all copies of the state to share the same ID memory.
+    pub id: Arc<str>,
+}
+impl<NodeImpl: Node + Send + Sync + 'static> NodeStateInner<NodeImpl> {
+    pub fn new(node: NodeImpl, id: Arc<str>) -> Self {
+        Self {
+            next_id: AtomicU64::new(0),
+            node,
+            output: Mutex::new(tokio_util::codec::FramedWrite::new(
+                tokio::io::stdout(),
+                tokio_serde::formats::SymmetricalJson::default(),
+            )),
+            id,
+        }
+    }
 }
 
 /// The top-level service state for a Maelstrom node.
 pub struct NodeState<NodeImpl: Node + Send + Sync + 'static> {
     inner: Arc<NodeStateInner<NodeImpl>>,
+}
+
+impl<NodeImpl: Node + Send + Sync + 'static> NodeState<NodeImpl> {
+    pub fn new(node: NodeImpl, id: Arc<str>) -> Self {
+        Self {
+            inner: Arc::new(NodeStateInner::new(node, id)),
+        }
+    }
 }
 
 impl<NodeImpl: Node + Send + Sync + 'static> Clone for NodeState<NodeImpl> {
@@ -86,7 +113,10 @@ where
     fn init(
         &self,
         state: &NodeState<Self>,
+        node_ids: Vec<String>,
     ) -> impl Future<Output = crate::Result<(), Self::Error>> + Send + Sync {
+        let _ = state;
+        let _ = node_ids;
         async { Ok(()) }
     }
 }
@@ -97,21 +127,21 @@ impl<NodeImpl: Node + Send + Sync + 'static> NodeState<NodeImpl> {
     }
 
     /// Get the node ID. Panics if called before init.
-    pub fn id(&self) -> &str {
-        self.inner.id.get().expect("node ID should be set on init")
+    pub fn id(&self) -> Arc<str> {
+        Arc::clone(&self.inner.id)
     }
 
     pub async fn send_init_ok(
         &mut self,
         re: MessageId,
-        dest: String,
+        dest: impl Into<Arc<str>>,
     ) -> crate::Result<(), NodeImpl::Error> {
         self.send_message(dest, Some(re), DataOrInit::InitOk).await
     }
 
     pub async fn reply(
         &self,
-        dest: String,
+        dest: impl Into<Arc<str>>,
         re: MessageId,
         data: NodeImpl::Message,
     ) -> crate::Result<(), NodeImpl::Error> {
@@ -122,7 +152,7 @@ impl<NodeImpl: Node + Send + Sync + 'static> NodeState<NodeImpl> {
     #[allow(unused)]
     pub async fn send(
         &self,
-        dest: String,
+        dest: impl Into<Arc<str>>,
         data: NodeImpl::Message,
     ) -> crate::Result<(), NodeImpl::Error> {
         self.send_message(dest, None, DataOrInit::Data(data)).await
@@ -130,23 +160,25 @@ impl<NodeImpl: Node + Send + Sync + 'static> NodeState<NodeImpl> {
 
     pub async fn send_message(
         &self,
-        dest: String,
+        dest: impl Into<Arc<str>>,
         re: Option<MessageId>,
         data: DataOrInit<NodeImpl::Message>,
     ) -> crate::Result<(), NodeImpl::Error> {
-        let src = self.id().to_owned();
         Ok(self
             .inner
-            .rpc
+            .output
+            .lock()
+            .await
             .send(Message {
-                src,
-                dest,
+                src: self.id(),
+                dest: dest.into(),
                 body: MessageBody {
                     id: Some(self.next_message_id()),
                     re,
                     data,
                 },
             })
+            .await
             .map_err(|e| crate::Error::Internal {
                 source: InternalError::Whatever {
                     message: format!("Error sending message: {}", e),
@@ -156,71 +188,39 @@ impl<NodeImpl: Node + Send + Sync + 'static> NodeState<NodeImpl> {
     }
 
     pub async fn run(node: NodeImpl) -> crate::Result<(), NodeImpl::Error> {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-
-        let mut state = Self {
-            inner: Arc::new(NodeStateInner {
-                // Default ID should be empty string - this will be set by the Maelstrom service.
-                id: OnceCell::new(),
-                node,
-                // channel: tokio_util::codec::Framed::new(
-                //     tokio::io::join(tokio::io::stdin(), tokio::io::stdout()),
-                //     tokio_serde::formats::SymmetricalJson::default(),
-                // ),
-                next_id: AtomicU64::new(0),
-                rpc: tx,
-            }),
-        };
-
         let json = tokio_serde::formats::SymmetricalJson::default();
-        let mut input = tokio_util::codec::FramedRead::new(tokio::io::stdin(), json);
-        let mut output = tokio_util::codec::FramedWrite::new(tokio::io::stdout(), json);
+        let mut stdin = tokio_util::codec::FramedRead::new(tokio::io::stdin(), json);
 
         tracing::info!("Starting Maelstrom node");
 
         let Message { src, body, .. } =
-            input.next().await.ok_or_else(|| crate::Error::Internal {
+            stdin.next().await.ok_or_else(|| crate::Error::Internal {
                 source: InternalError::Eof,
             })??;
 
-        match body.data {
-            DataOrInit::Init {
-                node_id,
-                node_ids: _,
-            } => {
+        let (node_id, node_ids) = match body.data {
+            DataOrInit::Init { node_id, node_ids } => {
                 tracing::info!("Received Init message from {}", node_id);
-                state
-                    .inner
-                    .id
-                    .set(node_id)
-                    .expect("ID should not be set yet");
 
-                state
-                    .send_init_ok(body.id.expect("init message ID"), src)
-                    .await?;
+                (node_id, node_ids)
             }
             _ => {
                 return Err(crate::Error::Internal {
                     source: crate::node::InternalError::NeedsInit,
                 });
             }
-        }
+        };
 
-        state.inner.node.init(&state).await?;
+        let mut state = NodeState::new(node, node_id.into());
 
-        tokio::spawn(async move {
-            let mut buf = Vec::new();
-            loop {
-                rx.recv_many(&mut buf, 8).await;
-                for msg in buf.drain(..) {
-                    output.feed(msg).await.ok();
-                }
-                output.flush().await.ok();
-            }
-        });
+        state
+            .send_init_ok(body.id.expect("init message ID"), src)
+            .await?;
+
+        state.inner.node.init(&state, node_ids).await?;
 
         loop {
-            match input.next().await.transpose() {
+            match stdin.next().await.transpose() {
                 Ok(Some(msg)) => {
                     tokio::spawn({
                         let state = state.clone();
@@ -238,7 +238,6 @@ impl<NodeImpl: Node + Send + Sync + 'static> NodeState<NodeImpl> {
                 }
                 Ok(None) => {
                     tracing::warn!("EOF on stdin");
-                    return Ok(());
                 }
                 Err(e) => {
                     return Err(e.into());

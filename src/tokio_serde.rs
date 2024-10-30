@@ -337,27 +337,27 @@ pub mod formats {
 
         pub type SymmetricalJson<T> = Json<T, T>;
 
-        impl<Item, SinkItem> Deserializer<Item> for Json<Item, SinkItem>
-        where
-            for<'a> Item: Deserialize<'a>,
-        {
-            type Error = serde_json::Error;
-
-            fn deserialize(self: Pin<&mut Self>, src: &BytesMut) -> Result<Item, Self::Error> {
-                serde_json::from_reader(std::io::Cursor::new(src).reader())
-            }
-        }
-
-        impl<Item, SinkItem> Serializer<SinkItem> for Json<Item, SinkItem>
-        where
-            SinkItem: Serialize,
-        {
-            type Error = serde_json::Error;
-
-            fn serialize(self: Pin<&mut Self>, item: &SinkItem) -> Result<Bytes, Self::Error> {
-                serde_json::to_vec(item).map(Into::into)
-            }
-        }
+        // impl<Item, SinkItem> Deserializer<Item> for Json<Item, SinkItem>
+        // where
+        //     for<'a> Item: Deserialize<'a>,
+        // {
+        //     type Error = serde_json::Error;
+        //
+        //     fn deserialize(self: Pin<&mut Self>, src: &BytesMut) -> Result<Item, Self::Error> {
+        //         serde_json::from_reader(std::io::Cursor::new(src).reader())
+        //     }
+        // }
+        //
+        // impl<Item, SinkItem> Serializer<SinkItem> for Json<Item, SinkItem>
+        // where
+        //     SinkItem: Serialize,
+        // {
+        //     type Error = serde_json::Error;
+        //
+        //     fn serialize(self: Pin<&mut Self>, item: &SinkItem) -> Result<Bytes, Self::Error> {
+        //         serde_json::to_vec(item).map(Into::into)
+        //     }
+        // }
 
         impl<Item, SinkItem> Decoder for Json<Item, SinkItem>
         where

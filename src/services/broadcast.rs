@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
+use arc_swap::access::Access;
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use snafu::Snafu;
@@ -56,10 +57,8 @@ pub enum BroadcastMessage {
 
 pub struct BroadcastServiceInner {
     topology: arc_swap::ArcSwap<HashMap<String, HashSet<String>>>,
-    // topology: atomic::Atomic<rpds::RedBlackTreeMapSync<String, HashSet<String>>>,
-    // received: AsyncDashMap<BroadcsatValue, ()>,
-    received_w: Mutex<evmap::WriteHandle<u64, ()>>,
-    read_factory: evmap::ReadHandleFactory<u64, ()>,
+    received: arc_swap::ArcSwap<im::HashSet<u64>>, // received_w: Mutex<evmap::WriteHandle<u64, ()>>,
+                                                   // read_factory: evmap::ReadHandleFactory<u64, ()>,
 }
 
 #[derive(Clone)]
@@ -69,14 +68,13 @@ pub struct BroadcastService {
 
 impl Default for BroadcastService {
     fn default() -> Self {
-        let (_received_r, received_w) = evmap::new();
+        // let (_received_r, received_w) = evmap::new();
         Self {
             inner: Arc::new(BroadcastServiceInner {
                 topology: arc_swap::ArcSwap::new(Arc::new(HashMap::new())),
-                // topology: atomic::Atomic::new(rpds::RedBlackTreeMap::new_sync()),
-                // received: AsyncDashMap::new(),
-                read_factory: received_w.factory(),
-                received_w: Mutex::new(received_w),
+                received: arc_swap::ArcSwap::new(Arc::new(im::HashSet::new())),
+                // read_factory: received_w.factory(),
+                // received_w: Mutex::new(received_w),
             }),
         }
     }
@@ -108,36 +106,37 @@ impl Node for BroadcastService {
             let inner = self.inner.clone();
             async move {
                 let mut interval = tokio::time::interval(Duration::from_millis(500));
-                let received_r = inner.read_factory.handle();
+                // interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+                // let received_r = inner.read_factory.handle();
 
                 loop {
                     interval.tick().await;
 
                     if let Some(neighbors) = inner.topology.load().get(node.id()).cloned() {
-                        let Some(updates) = received_r.read().map(|updates| {
-                            updates.iter().map(|entry| *entry.0).collect::<Vec<_>>()
-                        }) else {
-                            tracing::warn!("No updates");
-                            continue;
-                        };
+                        // let Some(updates) = received_r.read().map(|updates| {
+                        //     updates.iter().map(|entry| *entry.0).collect::<Vec<_>>()
+                        // }) else {
+                        //     tracing::warn!("No updates");
+                        //     continue;
+                        // };
                         // let received: Vec<_> = self.inner.received.iter().map(|e| *e.key()).collect();
                         tracing::info!("Sending messages to {:?}", neighbors);
+                        let updates = inner.received.load().clone();
                         for neighbor in neighbors.iter() {
                             for message in updates.iter().copied() {
                                 node.send(
                                     neighbor.clone(),
                                     BroadcastMessage::Broadcast { message },
                                 )
-                                .await?;
+                                .await
+                                .ok();
                             }
                         }
                     } else {
                         tracing::warn!("No topology entry for {}", node.id());
-                        break;
                     }
                 }
-
-                crate::Result::Ok(())
             }
         });
 
@@ -174,29 +173,31 @@ impl Node for BroadcastService {
                 )
                 .await?;
 
-                self.inner
-                    .received_w
-                    .lock()
-                    .await
-                    .insert(message, ())
-                    .refresh();
+                // self.inner
+                //     .received_w
+                //     .lock()
+                //     .await
+                //     .insert(message, ())
+                //     .refresh();
+                self.inner.received.rcu(|received| received.update(message));
             }
             BroadcastMessage::Read => {
-                let messages = self
-                    .inner
-                    .read_factory
-                    .handle()
-                    .read()
-                    .into_iter()
-                    .map(|mapref| {
-                        mapref
-                            .into_iter()
-                            .map(|(k, _)| *k)
-                            .collect::<Vec<_>>()
-                            .into_iter()
-                    })
-                    .flatten()
-                    .collect();
+                // let messages = self
+                //     .inner
+                //     .read_factory
+                //     .handle()
+                //     .read()
+                //     .into_iter()
+                //     .map(|mapref| {
+                //         mapref
+                //             .into_iter()
+                //             .map(|(k, _)| *k)
+                //             .collect::<Vec<_>>()
+                //             .into_iter()
+                //     })
+                //     .flatten()
+                //     .collect();
+                let messages = self.inner.received.load().iter().copied().collect();
 
                 node.send_message(
                     src,

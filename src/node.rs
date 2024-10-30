@@ -206,6 +206,8 @@ impl<NodeImpl: Node + Send + Sync + 'static> NodeState<NodeImpl> {
             }
         }
 
+        state.inner.node.init(&state).await?;
+
         tokio::spawn(async move {
             let mut buf = Vec::new();
             loop {

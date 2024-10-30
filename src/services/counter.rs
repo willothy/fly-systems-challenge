@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use snafu::Snafu;
@@ -24,28 +26,23 @@ pub enum ErrorCode {
     TxnConflict = 30,
 }
 
-// Valid message for testing: { "src": "a", "dest": "b", "body": { "type": "error", "code": 1, "text": "test", "msg_id": 1, "in_reply_to": 1 }}
-// { "src": "a", "dest": "b", "body": { "type": "init", "node_id": "a", "node_ids": ["a", "b"] }}
-
 /// The message body of a Maelstrom message.
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[serde(tag = "type")]
-pub enum EchoServiceMessage {
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CounterMessage {
     Error { code: ErrorCode, text: String },
 
-    // Application messages
-    Echo { echo: serde_json::Value },
-    EchoOk { echo: serde_json::Value },
+    Add { delta: u64 },
+    AddOk,
+    Read,
+    ReadOk { value: u64 },
 }
 
 #[derive(Default, Clone)]
-pub struct EchoService;
+pub struct CounterService {}
 
 #[derive(Debug, Snafu)]
-pub enum EchoServiceError {
-    #[snafu(display("Missing message ID"))]
-    MissingMessageId,
+pub enum CounterError {
     #[snafu(whatever, display("{message}"))]
     Whatever {
         message: String,
@@ -54,15 +51,15 @@ pub enum EchoServiceError {
     },
 }
 
-impl Into<Error<Self>> for EchoServiceError {
+impl Into<Error<Self>> for CounterError {
     fn into(self) -> Error<Self> {
         Error::Node { source: self }
     }
 }
 
-impl Node for EchoService {
-    type Message = EchoServiceMessage;
-    type Error = EchoServiceError;
+impl Node for CounterService {
+    type Message = CounterMessage;
+    type Error = CounterError;
 
     async fn handle_message(
         &self,
@@ -70,16 +67,6 @@ impl Node for EchoService {
         node: &NodeState<Self>,
     ) -> Result<(), Self::Error> {
         match body.data {
-            EchoServiceMessage::Echo { echo } => {
-                tracing::info!("Received Echo message from {}", src);
-
-                let Some(id) = body.id else {
-                    return Err(EchoServiceError::MissingMessageId.into());
-                };
-
-                node.reply(src, id, EchoServiceMessage::EchoOk { echo })
-                    .await?;
-            }
             unexpected => {
                 tracing::warn!("Unexpected message: {:?}", unexpected);
             }

@@ -4,6 +4,7 @@ use snafu::Report;
 mod tokio_serde;
 
 mod error;
+mod kv;
 mod message;
 mod node;
 mod services;

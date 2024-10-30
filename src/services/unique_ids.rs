@@ -1,4 +1,5 @@
-use std::ops::RangeFrom;
+use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
@@ -38,20 +39,9 @@ pub enum UniqueIdServiceMessage {
     GenerateOk { id: String },
 }
 
+#[derive(Clone, Default)]
 pub struct UniqueIdService {
-    next_id: RangeFrom<u64>,
-}
-
-impl UniqueIdService {
-    pub fn new() -> Self {
-        Self { next_id: 0.. }
-    }
-}
-
-impl Default for UniqueIdService {
-    fn default() -> Self {
-        Self::new()
-    }
+    next_id: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Snafu)]
@@ -61,8 +51,8 @@ pub enum UniqueIdServiceError {
     #[snafu(whatever, display("{message}"))]
     Whatever {
         message: String,
-        #[snafu(source(from(Box<dyn std::error::Error>, Some)))]
-        source: Option<Box<dyn std::error::Error>>,
+        #[snafu(source(from(Box<dyn std::error::Error+Send+Sync+'static>, Some)))]
+        source: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
     },
 }
 
@@ -77,9 +67,9 @@ impl Node for UniqueIdService {
     type Error = UniqueIdServiceError;
 
     async fn handle_message(
-        &mut self,
+        &self,
         Message { src, body, .. }: Message<Self::Message>,
-        node: &mut NodeState<Self>,
+        node: &NodeState<Self>,
     ) -> Result<(), Self::Error> {
         match body.data {
             UniqueIdServiceMessage::Generate => {
@@ -95,7 +85,12 @@ impl Node for UniqueIdService {
                     src,
                     msg_id,
                     UniqueIdServiceMessage::GenerateOk {
-                        id: format!("{}-{}", node_id, self.next_id.next().expect("unique ID")),
+                        id: format!(
+                            "{}-{}",
+                            node_id,
+                            self.next_id
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                        ),
                     },
                 )
                 .await?;

@@ -1,8 +1,10 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use snafu::Snafu;
+use tokio::sync::RwLock;
 
 pub use crate::error::*;
 use crate::message::Message;
@@ -50,10 +52,25 @@ pub enum BroadcastMessage {
     BroadcastOk,
 }
 
-#[derive(Default)]
+pub struct BroadcastServiceInner {
+    topology: RwLock<HashMap<String, HashSet<String>>>,
+    received: RwLock<HashSet<BroadcsatValue>>,
+}
+
+#[derive(Clone)]
 pub struct BroadcastService {
-    topology: HashMap<String, HashSet<String>>,
-    received: HashSet<BroadcsatValue>,
+    inner: Arc<BroadcastServiceInner>,
+}
+
+impl Default for BroadcastService {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(BroadcastServiceInner {
+                topology: RwLock::new(HashMap::new()),
+                received: RwLock::new(HashSet::new()),
+            }),
+        }
+    }
 }
 
 #[derive(Debug, Snafu)]
@@ -61,8 +78,8 @@ pub enum BroadcastError {
     #[snafu(whatever, display("{message}"))]
     Whatever {
         message: String,
-        #[snafu(source(from(Box<dyn std::error::Error>, Some)))]
-        source: Option<Box<dyn std::error::Error>>,
+        #[snafu(source(from(Box<dyn std::error::Error+Send+Sync+'static>, Some)))]
+        source: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
     },
 }
 
@@ -77,15 +94,13 @@ impl Node for BroadcastService {
     type Error = BroadcastError;
 
     async fn handle_message(
-        &mut self,
+        &self,
         Message { src, body, .. }: Message<Self::Message>,
-        node: &mut NodeState<Self>,
+        node: &NodeState<Self>,
     ) -> Result<(), Self::Error> {
         match body.data {
             BroadcastMessage::Topology { topology } => {
-                self.topology = topology;
-
-                tracing::info!("Updated topology: {:?}", self.topology);
+                *self.inner.topology.write().await = topology;
 
                 let reply = body.id.ok_or_else(|| Error::Node {
                     source: BroadcastError::Whatever {
@@ -97,7 +112,7 @@ impl Node for BroadcastService {
                 node.reply(src, reply, BroadcastMessage::TopologyOk).await?;
             }
             BroadcastMessage::Broadcast { message } => {
-                self.received.insert(message);
+                self.inner.received.write().await.insert(message);
 
                 let reply = body.id.ok_or_else(|| Error::Node {
                     source: BroadcastError::Whatever {
@@ -110,7 +125,7 @@ impl Node for BroadcastService {
                     .await?;
             }
             BroadcastMessage::Read => {
-                let messages = self.received.iter().cloned().collect();
+                let messages = self.inner.received.read().await.iter().cloned().collect();
                 let reply = body.id.ok_or_else(|| Error::Node {
                     source: BroadcastError::Whatever {
                         message: "No ID in message".into(),

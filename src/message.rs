@@ -59,7 +59,9 @@ pub struct Message<Data> {
 }
 
 impl<Data> Message<DataOrInit<Data>> {
-    pub fn into_data<E: std::error::Error + 'static>(self) -> crate::Result<Message<Data>, E> {
+    pub fn into_data<E: std::error::Error + Send + Sync + 'static>(
+        self,
+    ) -> crate::Result<Message<Data>, E> {
         match self.body.data {
             DataOrInit::Data(data) => Ok(Message {
                 src: self.src,

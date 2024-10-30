@@ -6,6 +6,7 @@ use std::{
 
 use futures::SinkExt as _;
 use serde::{Deserialize, Serialize};
+use snafu::Snafu;
 use tokio::{
     io::{Stdin, Stdout},
     sync::{OnceCell, RwLock},
@@ -13,7 +14,7 @@ use tokio::{
 use tokio_stream::StreamExt as _;
 
 use crate::{
-    message::{Message, MessageBody, MessageId},
+    message::{DataOrInit, Message, MessageBody, MessageId},
     tokio_serde,
 };
 
@@ -22,6 +23,28 @@ pub struct Peer {
     /// The node ID of the peer.
     #[allow(unused)]
     id: String,
+}
+
+#[derive(Debug, Snafu)]
+pub enum InternalError {
+    #[snafu(display("EOF on stdin"))]
+    Eof,
+    #[snafu(display("Unexpected Init message"))]
+    UnexpectedInit,
+    #[snafu(display("Node was queried before init"))]
+    NeedsInit,
+    #[snafu(whatever, display("{message}"))]
+    Whatever {
+        message: String,
+        #[snafu(source(from(Box<dyn std::error::Error>, Some)))]
+        source: Option<Box<dyn std::error::Error>>,
+    },
+}
+
+impl Into<crate::Error<InternalError>> for InternalError {
+    fn into(self) -> crate::Error<InternalError> {
+        crate::Error::Internal { source: self }
+    }
 }
 
 /// The top-level service state for a Maelstrom node.
@@ -34,7 +57,7 @@ pub struct NodeState<NodeImpl: Node> {
     /// The channel used to send and receive messages
     channel: tokio_util::codec::Framed<
         tokio::io::Join<Stdin, Stdout>,
-        tokio_serde::formats::SymmetricalJson<Message<NodeImpl::Message>>,
+        tokio_serde::formats::SymmetricalJson<Message<DataOrInit<NodeImpl::Message>>>,
     >,
     next_id: AtomicU64,
 }
@@ -71,7 +94,9 @@ impl<NodeImpl: Node> NodeState<NodeImpl> {
         self.next_id.fetch_add(1, Ordering::SeqCst)
     }
 
-    async fn recv(&mut self) -> crate::Result<Option<Message<NodeImpl::Message>>, NodeImpl::Error> {
+    async fn recv(
+        &mut self,
+    ) -> crate::Result<Option<Message<DataOrInit<NodeImpl::Message>>>, NodeImpl::Error> {
         Ok(self.channel.next().await.transpose()?)
     }
 
@@ -80,13 +105,22 @@ impl<NodeImpl: Node> NodeState<NodeImpl> {
         self.id.get().expect("node ID should be set on init")
     }
 
+    pub async fn send_init_ok(
+        &mut self,
+        re: MessageId,
+        dest: String,
+    ) -> crate::Result<(), NodeImpl::Error> {
+        self.send_message(dest, Some(re), DataOrInit::InitOk).await
+    }
+
     pub async fn reply(
         &mut self,
         dest: String,
         re: MessageId,
         data: NodeImpl::Message,
     ) -> crate::Result<(), NodeImpl::Error> {
-        self.send_message(dest, Some(re), data).await
+        self.send_message(dest, Some(re), DataOrInit::Data(data))
+            .await
     }
 
     #[allow(unused)]
@@ -95,14 +129,14 @@ impl<NodeImpl: Node> NodeState<NodeImpl> {
         dest: String,
         data: NodeImpl::Message,
     ) -> crate::Result<(), NodeImpl::Error> {
-        self.send_message(dest, None, data).await
+        self.send_message(dest, None, DataOrInit::Data(data)).await
     }
 
     async fn send_message(
         &mut self,
         dest: String,
         re: Option<MessageId>,
-        data: NodeImpl::Message,
+        data: DataOrInit<NodeImpl::Message>,
     ) -> crate::Result<(), NodeImpl::Error> {
         let src = self
             .id
@@ -123,12 +157,44 @@ impl<NodeImpl: Node> NodeState<NodeImpl> {
             .await?)
     }
 
-    pub async fn run(mut self, mut node: NodeImpl) -> Result<(), crate::Error<NodeImpl::Error>> {
+    pub async fn run(mut self, mut node: NodeImpl) -> crate::Result<(), NodeImpl::Error> {
         tracing::info!("Starting Maelstrom node");
+
+        let Message { src, body, .. } =
+            self.recv().await?.ok_or_else(|| crate::Error::Internal {
+                source: InternalError::Eof,
+            })?;
+
+        match body.data {
+            DataOrInit::Init {
+                node_id,
+                node_ids: _,
+            } => {
+                tracing::info!("Received Init message from {}", node_id);
+                self.id.set(node_id).expect("ID should not be set yet");
+
+                self.send_init_ok(body.id.expect("init message ID"), src)
+                    .await?;
+            }
+            _ => {
+                return Err(crate::Error::Internal {
+                    source: crate::node::InternalError::NeedsInit,
+                });
+            }
+        }
 
         loop {
             match self.recv().await {
-                Ok(Some(msg)) => node.handle_message(msg, &mut self).await?,
+                Ok(Some(msg)) => {
+                    let data = match msg.into_data::<crate::Error<NodeImpl::Error>>() {
+                        Ok(data) => data,
+                        Err(e) => {
+                            tracing::warn!("Error decoding message: {}", e);
+                            continue;
+                        }
+                    };
+                    node.handle_message(data, &mut self).await?
+                }
                 Ok(None) => {
                     tracing::warn!("EOF on stdin");
                     return Ok(());

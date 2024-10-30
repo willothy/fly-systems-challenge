@@ -32,29 +32,11 @@ pub enum ErrorCode {
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "type")]
 pub enum EchoServiceMessage {
-    /// Sent from Maelstrom to each node at the start of the simulation.
-    Init {
-        /// The node ID assigned to the receiver. The receiver should use this ID in all subsequent
-        node_id: String,
-        /// A list of every node ID in the network, including the receiver. An identical list,
-        /// including order, is sent to each node.
-        node_ids: Vec<String>,
-    },
-    /// Sent from Maelstrom to each node to indicate that the simulation has started.
-    InitOk,
-
-    Error {
-        code: ErrorCode,
-        text: String,
-    },
+    Error { code: ErrorCode, text: String },
 
     // Application messages
-    Echo {
-        echo: serde_json::Value,
-    },
-    EchoOk {
-        echo: serde_json::Value,
-    },
+    Echo { echo: serde_json::Value },
+    EchoOk { echo: serde_json::Value },
 }
 
 #[derive(Default)]
@@ -88,19 +70,6 @@ impl Node for EchoService {
         node: &mut NodeState<Self>,
     ) -> Result<(), Self::Error> {
         match body.data {
-            EchoServiceMessage::Init {
-                node_id,
-                node_ids: _,
-            } => {
-                tracing::info!("Received Init message from {}", src);
-                node.id.set(node_id).ok();
-
-                let Some(id) = body.id else {
-                    return Err(EchoServiceError::MissingMessageId.into());
-                };
-
-                node.reply(src, id, EchoServiceMessage::InitOk).await?;
-            }
             EchoServiceMessage::Echo { echo } => {
                 tracing::info!("Received Echo message from {}", src);
 

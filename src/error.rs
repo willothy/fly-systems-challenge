@@ -14,6 +14,12 @@ pub enum Error<E: std::error::Error + Sized + 'static> {
         source: E,
     },
 
+    #[snafu(display("Node error: {}", source))]
+    Internal {
+        #[snafu(source)]
+        source: crate::node::InternalError,
+    },
+
     #[snafu(whatever, display("{message}"))]
     Whatever {
         message: String,

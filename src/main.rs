@@ -1,3 +1,4 @@
+use services::broadcast::BroadcastService;
 use snafu::Report;
 
 mod tokio_serde;
@@ -22,7 +23,7 @@ async fn main() {
         .with_file(true)
         .init();
 
-    if let Err(e) = node::run(UniqueIdService::default()).await {
+    if let Err(e) = node::run(BroadcastService::default()).await {
         tracing::error!("{}", Report::from_error(e));
     }
 }

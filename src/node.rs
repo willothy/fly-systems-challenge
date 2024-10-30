@@ -1,5 +1,4 @@
 use std::{
-    collections::{HashMap, HashSet},
     future::Future,
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -9,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use snafu::Snafu;
 use tokio::{
     io::{Stdin, Stdout},
-    sync::{OnceCell, RwLock},
+    sync::OnceCell,
 };
 use tokio_stream::StreamExt as _;
 
@@ -17,13 +16,6 @@ use crate::{
     message::{DataOrInit, Message, MessageBody, MessageId},
     tokio_serde,
 };
-
-/// A peer node in the Maelstrom network.
-pub struct Peer {
-    /// The node ID of the peer.
-    #[allow(unused)]
-    id: String,
-}
 
 #[derive(Debug, Snafu)]
 pub enum InternalError {
@@ -51,9 +43,6 @@ impl Into<crate::Error<InternalError>> for InternalError {
 pub struct NodeState<NodeImpl: Node> {
     /// The node ID.
     pub id: OnceCell<String>,
-    /// Map of node ID to neighnor node IDs.
-    #[allow(unused)]
-    topology: RwLock<HashMap<String, HashSet<Peer>>>,
     /// The channel used to send and receive messages
     channel: tokio_util::codec::Framed<
         tokio::io::Join<Stdin, Stdout>,
@@ -81,7 +70,6 @@ impl<NodeImpl: Node> NodeState<NodeImpl> {
         Self {
             // Default ID should be empty string - this will be set by the Maelstrom service.
             id: OnceCell::new(),
-            topology: RwLock::new(HashMap::new()),
             channel: tokio_util::codec::Framed::new(
                 tokio::io::join(tokio::io::stdin(), tokio::io::stdout()),
                 tokio_serde::formats::SymmetricalJson::default(),

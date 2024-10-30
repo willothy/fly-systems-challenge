@@ -368,10 +368,20 @@ pub mod formats {
 
             fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
                 if src.trim_ascii().len() == 0 {
+                    src.clear();
                     return Ok(None);
                 }
 
-                let item = serde_json::from_reader(src.reader())?;
+                let item = match serde_json::from_reader(std::io::Cursor::new(&mut *src).reader()) {
+                    Ok(item) => {
+                        src.clear();
+                        item
+                    }
+                    Err(err) if err.is_eof() || err.is_syntax() => {
+                        return Ok(None);
+                    }
+                    Err(e) => return Err(e.into()),
+                };
 
                 Ok(Some(item))
             }

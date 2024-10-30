@@ -75,6 +75,11 @@ impl<NodeImpl: Node> NodeState<NodeImpl> {
         Ok(self.channel.next().await.transpose()?)
     }
 
+    /// Get the node ID. Panics if called before init.
+    pub fn id(&self) -> &str {
+        self.id.get().expect("node ID should be set on init")
+    }
+
     pub async fn reply(
         &mut self,
         dest: String,
@@ -122,15 +127,17 @@ impl<NodeImpl: Node> NodeState<NodeImpl> {
         tracing::info!("Starting Maelstrom node");
 
         loop {
-            let msg = match self.recv().await? {
-                Some(msg) => msg,
-                None => break,
-            };
-
-            node.handle_message(msg, &mut self).await?;
+            match self.recv().await {
+                Ok(Some(msg)) => node.handle_message(msg, &mut self).await?,
+                Ok(None) => {
+                    tracing::warn!("EOF on stdin");
+                    return Ok(());
+                }
+                Err(e) => {
+                    return Err(e.into());
+                }
+            }
         }
-
-        Ok(())
     }
 }
 

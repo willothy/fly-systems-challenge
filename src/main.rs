@@ -1,4 +1,3 @@
-use services::echo::EchoService;
 use snafu::Report;
 
 mod tokio_serde;
@@ -10,6 +9,9 @@ mod services;
 
 pub use error::*;
 
+#[allow(unused)]
+use services::{echo::EchoService, unique_ids::UniqueIdService};
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
@@ -20,7 +22,7 @@ async fn main() {
         .with_file(true)
         .init();
 
-    if let Err(e) = node::run(EchoService).await {
-        println!("{}", Report::from_error(e));
+    if let Err(e) = node::run(UniqueIdService::default()).await {
+        tracing::error!("{}", Report::from_error(e));
     }
 }
